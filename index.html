@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tamagotchi</title>
+<style>
+body{ margin:0; height:100vh; display:grid; place-items:center; background:#eef0f6; overflow:hidden; }
+
+/* Semua gambar berukuran sama (1109x1418) dan ditumpuk di kanvas yang sama,
+   jadi posisinya otomatis pas. Kanvas lalu diperkecil/dipotong ke area telur. */
+#kotak{ position:relative; overflow:hidden; }
+#stage{ position:absolute; width:1109px; height:1418px; transform-origin:0 0; }
+.layer{ position:absolute; left:0; top:0; width:1109px; height:1418px; user-select:none; -webkit-user-drag:none; }
+
+#sorot{ position:absolute; width:64px; height:60px; box-sizing:border-box;
+  border:3px solid #6c4bd6; border-radius:10px; pointer-events:none; }
+.hati{ position:absolute; width:25px; height:21px; background-repeat:no-repeat; background-size:1109px 1418px; }
+
+.tb{ position:absolute; width:60px; height:60px; border:0; border-radius:50%;
+  background:transparent; cursor:pointer; }
+.tb:active{ background:rgba(0,0,0,.18); }
+</style>
+</head>
+<body>
+
+<div id="kotak">
+  <div id="stage">
+    <img class="layer" src="img/cangkang.png" alt="">
+    <img class="layer" src="img/swirl.png" alt="">
+
+    <!-- tampilan utama -->
+    <img id="ikon" class="layer" src="img/icon.png" alt="">
+    <div id="sorot"></div>
+    <img id="karakter" class="layer" src="img/karakterdeafult.png" alt="">
+
+    <!-- layar timbangan -->
+    <img id="timbangan" class="layer" src="img/timbangan.png" alt="" style="display:none">
+    <div id="hatiWadah" style="display:none"></div>
+
+    <!-- 3 tombol di cangkang (menimpa tombol biru) -->
+    <button class="tb" id="tb1" style="left:406px; top:861px" aria-label="Pindah pilihan"></button>
+    <button class="tb" id="tb2" style="left:536px; top:876px" aria-label="Pilih"></button>
+    <button class="tb" id="tb3" style="left:663px; top:860px" aria-label="Kembali"></button>
+  </div>
+</div>
+
+<script>
+/* ================= PENGATURAN ================= */
+const IMG = "img/";
+const POSE = {
+  normal:"karakterdeafult.png",         happy:"karakterhappy.png",
+  sakit:"karaktersakit.png",            main:"karaktermain.png",
+  makan:"karaktermakan.png",            poop:"karakterpoop.png",
+  tidur:"karakter_tidur.png",           ceramah:"karaktermendengarceramah.png",
+  ngambek:"karakterngambek.png",        perhatian:"karakterbutuhperhatian.png"
+};
+
+// semua waktu dalam DETIK (ubah di sini kalau mau lebih cepat/lambat)
+const D = {
+  sakit:90,     // sakit muncul tiap 90 detik
+  poop:15,      // poop muncul tiap 15 detik
+  ngambek:45,   // ngambek muncul tiap 45 detik
+  lapar:30,     // hunger turun 1 hati tiap 30 detik
+  joy:40,       // joy turun 1 hati tiap 40 detik
+  energi:60,    // energy turun 1 hati tiap 60 detik
+  main:5,       // lama pose main
+  ceramah:5,    // lama pose mendengar ceramah
+  makan:3,      // lama pose makan
+  tidur:10,     // lama tidur setelah lampu dipencet
+  happy:3       // lama pose happy setelah menyelesaikan task
+};
+
+const MAKS = { hunger:3, energy:3, health:3, joy:4 };   // jumlah hati maksimal
+const RENDAH = 1;   // kalau ada hati <= angka ini, karakter jadi "butuh perhatian"
+
+/* ================= DATA GAME ================= */
+const s = { hunger:3, energy:3, health:3, joy:4,
+            sakit:false, poop:false, ngambek:false, tidur:false };
+let temp = null;      // pose sementara (makan, main, happy, dst)
+let sibuk = false;    // true saat animasi berjalan (aksi lain diabaikan)
+let layar = "utama";  // "utama" atau "status"
+let kursor = 0;       // ikon terpilih 0-7
+let seq;
+const $ = id => document.getElementById(id);
+const naik  = (k) => s[k] = Math.min(MAKS[k], s[k] + 1);
+const turun = (k) => s[k] = Math.max(0, s[k] - 1);
+
+/* ================= POSISI (koordinat kanvas 1109x1418) ================= */
+const IKON_X = [467, 532, 598, 664];     // titik tengah tiap ikon
+const IKON_Y = [575, 808];               // baris atas, baris bawah
+const BARIS_HATI = [
+  { k:"hunger", y:641, x:[560,590,621] },
+  { k:"energy", y:693, x:[560,590,621] },
+  { k:"health", y:743, x:[560,590,621] },
+  { k:"joy",    y:792, x:[528,560,590,621] }
+];
+
+/* ================= POSE ================= */
+function poseSekarang(){
+  if (temp) return temp;
+  if (s.tidur) return "tidur";
+  if (s.sakit) return "sakit";
+  if (s.poop) return "poop";
+  if (s.ngambek) return "ngambek";
+  if (Object.keys(MAKS).some(k => s[k] <= RENDAH)) return "perhatian";
+  return "normal";
+}
+
+// jalankan urutan pose, mis. [["makan",3],["happy",3]]
+function urut(langkah){
+  clearTimeout(seq);
+  sibuk = true;
+  let i = 0;
+  (function lanjut(){
+    if (i >= langkah.length){ temp = null; sibuk = false; render(); return; }
+    temp = langkah[i][0]; render();
+    seq = setTimeout(lanjut, langkah[i][1] * 1000);
+    i++;
+  })();
+}
+
+/* ================= AKSI IKON ================= */
+function aksi(i){
+  if (i === 5){ layar = "status"; render(); return; }      // timbangan
+  if (sibuk) return;
+  switch (i){
+    case 0:                                                  // garpu pisau = makan
+      if (s.hunger >= MAKS.hunger) return;
+      naik("hunger");
+      urut([["makan", D.makan], ["happy", D.happy]]); break;
+    case 1:                                                  // lampu = tidur
+      s.tidur = true; sibuk = true; render();
+      seq = setTimeout(() => {
+        s.tidur = false; s.energy = MAKS.energy;
+        urut([["happy", D.happy]]);
+      }, D.tidur * 1000); break;
+    case 2:                                                  // kasti = main
+      naik("joy");
+      urut([["main", D.main], ["happy", D.happy]]); break;
+    case 3:                                                  // suntik = obat
+      if (!s.sakit) return;
+      s.sakit = false; naik("health");
+      urut([["happy", D.happy]]); break;
+    case 4:                                                  // bebek = mandi
+      if (!s.poop) return;
+      s.poop = false; naik("joy");
+      urut([["happy", D.happy]]); break;
+    case 7:                                                  // 2 muka = ceramah
+      if (!s.ngambek) return;
+      s.ngambek = false; naik("joy");
+      urut([["ceramah", D.ceramah], ["happy", D.happy]]); break;
+    // case 6 (ikon pacman): belum ada fungsi
+  }
+}
+
+/* ================= TAMPILAN ================= */
+function gambarHati(){
+  const w = $("hatiWadah");
+  w.innerHTML = "";
+  BARIS_HATI.forEach(b => b.x.forEach((x, i) => {
+    const d = document.createElement("div");
+    d.className = "hati";
+    const berkas = i < s[b.k] ? "hatifull.png" : "hatikosong.png";
+    d.style.cssText = `left:${x}px; top:${b.y}px; background-image:url(${IMG}${berkas}); background-position:-${x}px -${b.y}px;`;
+    w.appendChild(d);
+  }));
+}
+
+function render(){
+  const status = layar === "status";
+  ["ikon","sorot","karakter"].forEach(id => $(id).style.display = status ? "none" : "block");
+  $("timbangan").style.display = $("hatiWadah").style.display = status ? "block" : "none";
+  if (status){ gambarHati(); return; }
+
+  $("karakter").src = IMG + POSE[poseSekarang()];
+  const cx = IKON_X[kursor % 4], cy = IKON_Y[kursor < 4 ? 0 : 1];
+  $("sorot").style.left = (cx - 32) + "px";
+  $("sorot").style.top  = (cy - 30) + "px";
+}
+
+/* ================= WAKTU ================= */
+let t = 0;
+setInterval(() => {
+  t++;
+  if (!s.tidur){
+    if (t % D.lapar  === 0) turun("hunger");
+    if (t % D.joy    === 0) turun("joy");
+    if (t % D.energi === 0) turun("energy");
+  }
+  if (t % D.sakit === 0 && !s.sakit){ s.sakit = true; turun("health"); }
+  if (t % D.poop === 0)    s.poop = true;
+  if (t % D.ngambek === 0) s.ngambek = true;
+  render();
+}, 1000);
+
+/* ================= TOMBOL ================= */
+const kiri   = () => { if (layar === "utama"){ kursor = (kursor + 1) % 8; render(); } };
+const tengah = () => { if (layar === "status"){ layar = "utama"; render(); } else aksi(kursor); };
+const kanan  = () => { if (layar === "status"){ layar = "utama"; render(); } };
+$("tb1").onclick = kiri; $("tb2").onclick = tengah; $("tb3").onclick = kanan;
+document.addEventListener("keydown", e => {
+  if (e.key === "ArrowRight" || e.key === "a") kiri();
+  if (e.key === "Enter"      || e.key === "s") tengah();
+  if (e.key === "Escape"     || e.key === "d") kanan();
+});
+
+/* ================= UKURAN LAYAR ================= */
+const TELUR = { x:278, y:380, w:575, h:668 };   // area telur di kanvas
+function atur(){
+  const k = Math.min((innerWidth - 16) / TELUR.w, (innerHeight - 16) / TELUR.h, 1.15);
+  $("kotak").style.width  = TELUR.w * k + "px";
+  $("kotak").style.height = TELUR.h * k + "px";
+  $("stage").style.transform = `translate(${-TELUR.x * k}px, ${-TELUR.y * k}px) scale(${k})`;
+}
+addEventListener("resize", atur);
+atur(); render();
+</script>
+</body>
+</html>
